@@ -31,10 +31,12 @@ def run_benchmarks(csv_file="benchmark_results.csv"):
     time.sleep(1)
     results.append(["baseline_iperf_h1_h2", h1.cmd("iperf -c 10.0.0.2 -t 5")])
 
-    info("*** Trigger attack from h1\n")
-    for _ in range(50):
-        h1.cmd("ping -c 1 10.0.0.2 > /dev/null &")
-    time.sleep(2)
+    info("*** Trigger strong attack (ICMP flood) from h1\n")
+    # Send a fast flood so the controller sees enough PacketIns to trigger detection
+    # Use -f (flood) with a fixed count; run in background on h1
+    h1.cmd("ping -f -c 200 10.0.0.2 > /dev/null &")
+    # give the controller a bit more time to detect and install drop rules
+    time.sleep(6)
 
     info("*** Ping after firewall block\n")
     results.append(["post_block_ping_h1_h2", h1.cmd("ping -c 5 10.0.0.2")])
