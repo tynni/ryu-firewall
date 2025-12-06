@@ -4,6 +4,7 @@ from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cl
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ipv4
 from ryu.lib import hub
+from collections import deque
 import logging
 
 LOG = logging.getLogger('ryu.app.dynamic_firewall')
@@ -11,13 +12,17 @@ LOG.setLevel(logging.INFO)
 
 class DynamicFirewall(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
-    THRESHOLD = 10  # packets per interval
+    THRESHOLD = 4  # packets over WINDOW seconds to trigger block (lowered for testing)
     POLL_INTERVAL = 1  # seconds
+    WINDOW = 3  # number of intervals to keep in sliding window
 
     def __init__(self, *args, **kwargs):
         super(DynamicFirewall, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.ip_pkt_counts = {}
+        # counts collected during the current interval (ip -> count)
+        self.current_counts = {}
+        # sliding window of recent interval counts per IP (ip -> deque)
+        self.ip_pkt_window = {}
         self.blocked_ips = set()
         self.datapaths = {}
         self.monitor_thread = hub.spawn(self._monitor)
@@ -63,10 +68,13 @@ class DynamicFirewall(app_manager.RyuApp):
         ip_hdr = pkt.get_protocol(ipv4.ipv4)
         if ip_hdr:
             src_ip = ip_hdr.src
-            self.ip_pkt_counts[src_ip] = self.ip_pkt_counts.get(src_ip, 0) + 1
+            # increment counter for this interval
+            self.current_counts[src_ip] = self.current_counts.get(src_ip, 0) + 1
+            LOG.debug("packet from %s count=%s", src_ip, self.current_counts[src_ip])
 
             if src_ip in self.blocked_ips:
-                # Drop attacker packets immediately
+                # Drop attacker packets immediately (do not forward)
+                LOG.info("Dropping packet from blocked IP %s", src_ip)
                 return
 
         # L2 forwarding
@@ -79,14 +87,11 @@ class DynamicFirewall(app_manager.RyuApp):
                                   data=msg.data)
         datapath.send_msg(out)
 
-        # Install L2 forwarding flow for known destination
+        # Install a simple L2 forwarding flow for known destination.
+        # Do NOT include ipv4_src in the match — that would short-circuit
+        # PacketIn events and hide attack traffic from the controller.
         if out_port != ofproto.OFPP_FLOOD:
-            match_fields = {'eth_dst': dst_mac}
-            if ip_hdr:
-                match_fields.update({'eth_type': 0x0800,
-                                     'ipv4_src': src_ip,
-                                     'ipv4_dst': ip_hdr.dst})
-            match = parser.OFPMatch(**match_fields)
+            match = parser.OFPMatch(eth_dst=dst_mac)
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
             mod = parser.OFPFlowMod(datapath=datapath,
                                     priority=1,
@@ -97,15 +102,27 @@ class DynamicFirewall(app_manager.RyuApp):
 
     def _monitor(self):
         while True:
-            self._check_attacks()
-            self.ip_pkt_counts.clear()
+            try:
+                self._check_attacks()
+            except Exception:
+                LOG.exception("error in monitor")
+            # clear current interval counts after processing (window keeps history)
+            self.current_counts.clear()
             hub.sleep(self.POLL_INTERVAL)
 
     def _check_attacks(self):
-        for ip, count in self.ip_pkt_counts.items():
-            if count > self.THRESHOLD and ip not in self.blocked_ips:
+        # Append current interval counts into sliding windows and evaluate totals
+        LOG.info("Checking attacks; monitored_ips=%s", list(self.current_counts.keys()))
+        for ip, cnt in list(self.current_counts.items()):
+            dq = self.ip_pkt_window.setdefault(ip, deque(maxlen=self.WINDOW))
+            dq.append(cnt)
+            total = sum(dq)
+            LOG.info("ip %s window=%s total=%s", ip, list(dq), total)
+            if total > self.THRESHOLD and ip not in self.blocked_ips:
                 self.blocked_ips.add(ip)
-                LOG.warning(f"BLOCKING attacker {ip} ({count} pkts)")
+                LOG.warning("BLOCKING attacker %s (%s pkts over %s s)", ip, total, self.WINDOW)
+                if not self.datapaths:
+                    LOG.warning("No datapaths known when attempting to block %s", ip)
                 for dp in self.datapaths.values():
                     self._install_drop(dp, ip)
 
