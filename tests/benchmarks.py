@@ -33,9 +33,7 @@ def run_benchmarks(csv_file="benchmark_results.csv"):
 
     info("*** Trigger strong attack (ICMP flood) from h1\n")
     # Send a fast flood so the controller sees enough PacketIns to trigger detection
-    # Use -f (flood) with a fixed count; run in background on h1
     h1.cmd("ping -f -c 200 10.0.0.2 > /dev/null &")
-    # give the controller a bit more time to detect and install drop rules
     time.sleep(6)
 
     info("*** Ping after firewall block\n")
@@ -55,3 +53,4 @@ def run_benchmarks(csv_file="benchmark_results.csv"):
 if __name__ == "__main__":
     setLogLevel("info")
     run_benchmarks()
+
