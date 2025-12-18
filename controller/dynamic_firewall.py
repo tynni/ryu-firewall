@@ -88,7 +88,6 @@ class DynamicFirewall(app_manager.RyuApp):
         datapath.send_msg(out)
 
         # Install a simple L2 forwarding flow for known destination.
-        # Do NOT include ipv4_src in the match — that would short-circuit
         # PacketIn events and hide attack traffic from the controller.
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(eth_dst=dst_mac)
